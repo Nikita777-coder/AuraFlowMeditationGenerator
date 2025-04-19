@@ -6,16 +6,14 @@ import json
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
-from pydub import AudioSegment
 from yandex_cloud_ml_sdk import YCloudML
 from speechkit import model_repository, configure_credentials, creds
 import boto3
 import re
 from threading import Thread
-import logging
 import math
 
-status_store = {}  # in-memory fallback instead of redis
+status_store = {}
 
 load_dotenv()
 
@@ -46,9 +44,6 @@ def save_status(id_, status, url=None):
         "wasUsed": "false"
     }
     status_store[id_] = data
-    path = os.path.join(STATUS_DIR, f"{id_}.json")
-    with open(path, "w") as f:
-        json.dump(data, f)
 
 
 def get_status(id_):
@@ -101,8 +96,7 @@ def text_to_speech(text, wav_path='output.wav', mp3_path='output.mp3'):
     model.role = 'friendly'
     result = model.synthesize(add_tts_markup(text), raw_format=False)
     result.export(wav_path, 'wav')
-    audio = AudioSegment.from_wav(wav_path)
-    audio.export(mp3_path, format="mp3")
+    os.system(f"ffmpeg -y -i {wav_path} -b:a 64k {mp3_path}")
     return mp3_path
 
 
@@ -289,11 +283,11 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
         keywords = prompt_processing(melody_request)
         mel_wav = generate_audio_output_stereo(keywords, duration_minutes, f"mel_{task_id}.wav")
 
-        med_audio = AudioSegment.from_mp3(med_mp3)
-        mel_audio = AudioSegment.from_wav(mel_wav)
-        combined = mel_audio.overlay(med_audio)
-        final_path = f"final_{task_id}.mp3"
-        combined.export(final_path, format="mp3", bitrate="64k")
+        combined_path = f"final_{task_id}.mp3"
+        os.system(
+            f"ffmpeg -y -i {mel_wav} -i {med_mp3} -filter_complex amix=inputs=2:duration=first:dropout_transition=3 -b:a 64k {combined_path}")
+        final_path = combined_path
+        # экспорт уже выполнен через ffmpeg
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         object_name = f"audio/meditation_{timestamp}_{task_id}.mp3"
@@ -301,13 +295,11 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
 
         save_status(task_id, "ready", url)
 
-        # Удаление временных файлов
-        for f in [med_mp3, f"med_{task_id}.wav", mel_wav, final_path]:
+        for f in [med_mp3, f"med_{task_id}.wav", mel_wav, combined_path]:
             if os.path.exists(f):
                 os.remove(f)
 
     except Exception as e:
-        logging.error(f"Error in task {task_id}: {e}")
         save_status(task_id, "error")
 
 
@@ -323,10 +315,6 @@ async def auto_cleanup():
             val = status_store.get(key)
             if val and val.get("status") == "ready" and val.get("wasUsed") == "true":
                 del status_store[key]
-                logging.info(f"Auto-removed used meditation: {key}")
-
-        logging.debug("Cleanup cycle complete")
-
 
 @app.route('/generate_meditation', methods=['POST'])
 def generate():
@@ -346,7 +334,3 @@ def status(task_id):
 def validate_auth_token(token):
     if not token or not token.startswith("Bearer ") or token.split("Bearer ")[-1] != AUTH_JWT_SECRET:
         raise RuntimeError("invalid token")
-
-
-if __name__ == '__main__':
-    app.run(debug=True)
