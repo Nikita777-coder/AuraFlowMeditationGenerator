@@ -52,6 +52,7 @@ def save_status(id_, status, url=None):
         "wasUsed": "false"
     }
 
+    print(redis_client.exists(id_))
     if redis_client.exists(id_) and redis_client.type(id_) != "hash":
         print("r")
         redis_client.delete(id_)
