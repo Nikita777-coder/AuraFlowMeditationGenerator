@@ -53,12 +53,14 @@ def save_status(id_, status, url=None):
         "wasUsed": "false"
     }
 
+    print("r")
     print(redis_client.exists(id_))
     if redis_client.exists(id_) and redis_client.type(id_) != "hash":
         print("r")
         redis_client.delete(id_)
 
     try:
+        print("r")
         redis_client.hset(id_, mapping=data)
     except Exception as e:
         print(f"[Redis Save Error] id={id_} data={data} error={e}")
