@@ -44,11 +44,15 @@ os.makedirs(STATUS_DIR, exist_ok=True)
 
 
 def save_status(id_, status, url=None):
+    print("r")
     data = {"status": status, "url": url or "", "wasUsed": "false"}
     redis_client.hset(id_, mapping=data)
+    print("r")
     path = os.path.join(STATUS_DIR, f"{id_}.json")
     with open(path, "w") as f:
+        print("r")
         json.dump(data, f)
+        print("r")
 
 
 def get_status(id_):
