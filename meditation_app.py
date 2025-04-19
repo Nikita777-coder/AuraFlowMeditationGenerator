@@ -3,10 +3,7 @@ import wave
 import struct
 import uuid
 import json
-import math
 from datetime import datetime
-
-import redis
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from pydub import AudioSegment
@@ -16,13 +13,11 @@ import boto3
 import re
 from threading import Thread
 import logging
+import math
+
+status_store = {}  # in-memory fallback instead of redis
 
 load_dotenv()
-
-REDIS_URL = os.getenv("REDIS_URL")
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-
-logging.basicConfig(filename="app.log", level=logging.ERROR)
 
 YANDEX_STORAGE_ACCESS_KEY = os.getenv("YANDEX_STORAGE_ACCESS_KEY")
 YANDEX_STORAGE_SECRET_KEY = os.getenv("YANDEX_STORAGE_SECRET_KEY")
@@ -45,40 +40,32 @@ os.makedirs(STATUS_DIR, exist_ok=True)
 
 
 def save_status(id_, status, url=None):
-    print("r")
-
     data = {
         "status": str(status),
         "url": str(url or ""),
         "wasUsed": "false"
     }
-
-    print("r")
-    print(redis_client.exists(id_))
-    if redis_client.exists(id_) and redis_client.type(id_) != "hash":
-        print("r")
-        redis_client.delete(id_)
-
-    try:
-        print("r")
-        redis_client.hset(id_, mapping=data)
-    except Exception as e:
-        print(f"[Redis Save Error] id={id_} data={data} error={e}")
-        raise
-    print("r")
+    status_store[id_] = data
     path = os.path.join(STATUS_DIR, f"{id_}.json")
     with open(path, "w") as f:
-        print("r")
         json.dump(data, f)
-        print("r")
 
 
 def get_status(id_):
-    redis_data = redis_client.hgetall(id_)
-    if redis_data:
-        if redis_data.get("status") == "ready":
-            redis_client.hset(id_, "wasUsed", "true")
-        return redis_data
+    data = status_store.get(id_)
+    if data:
+        if data.get("status") == "ready":
+            data["wasUsed"] = "true"
+        return data
+
+    path = os.path.join(STATUS_DIR, f"{id_}.json")
+    if not os.path.exists(path):
+        return {"status": "not_found"}
+    with open(path) as f:
+        data = json.load(f)
+    if data.get("status") == "ready":
+        os.remove(path)
+    return data
 
     path = os.path.join(STATUS_DIR, f"{id_}.json")
     if not os.path.exists(path):
@@ -199,7 +186,6 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
     save_wave_stereo(output_file, sample_rate, final_track)
     return output_file
 
-
 def mix_stereo_audios(*tracks):
     if not tracks:
         return []
@@ -215,79 +201,6 @@ def mix_stereo_audios(*tracks):
         sum_right = max(min(sum_right, 32767), -32768)
         mixed.append((sum_left, sum_right))
     return mixed
-
-
-def save_wave_stereo(filename, sample_rate, samples):
-    with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(1)  # моно вместо стерео для экономии
-        wf.setsampwidth(2)  # 16 бит
-        wf.setframerate(sample_rate)
-        for sample in samples:
-            left, right = sample if isinstance(sample, tuple) else (sample, sample)
-            mono_sample = (left + right) // 2
-            wf.writeframesraw(struct.pack('<h', mono_sample))
-
-
-def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
-    s3 = boto3.client(
-        's3',
-        endpoint_url="https://storage.yandexcloud.net",
-        aws_access_key_id=YANDEX_STORAGE_ACCESS_KEY,
-        aws_secret_access_key=YANDEX_STORAGE_SECRET_KEY
-    )
-    s3.upload_file(local_file_path, bucket_name, object_name)
-    return f"https://storage.yandexcloud.net/{bucket_name}/{object_name}"
-
-
-def process_all(task_id, duration_minutes, meditation_topic, melody_request):
-    try:
-        print("co")
-        text = generate_meditation_text(duration_minutes, meditation_topic)
-        med_mp3 = text_to_speech(text, f"med_{task_id}.wav", f"med_{task_id}.mp3")
-        keywords = prompt_processing(melody_request)
-        mel_wav = generate_audio_output_stereo(keywords, duration_minutes, f"mel_{task_id}.wav")
-
-        med_audio = AudioSegment.from_mp3(med_mp3)
-        mel_audio = AudioSegment.from_wav(mel_wav)
-        combined = mel_audio.overlay(med_audio)
-        final_path = f"final_{task_id}.mp3"
-        combined.export(final_path, format="mp3", bitrate="64k")
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        object_name = f"audio/meditation_{timestamp}_{task_id}.mp3"
-        url = upload_to_yandex_storage(final_path, YANDEX_CLOUD_BUCKET, object_name)
-
-        save_status(task_id, "ready", url)
-
-        # Удаление временных файлов
-        for f in [med_mp3, f"med_{task_id}.wav", mel_wav, final_path]:
-            if os.path.exists(f):
-                os.remove(f)
-
-    except Exception as e:
-        logging.error(f"Error in task {task_id}: {e}")
-        save_status(task_id, "error")
-
-
-import asyncio
-
-app = Flask(__name__)
-
-
-async def auto_cleanup():
-    while True:
-        await asyncio.sleep(60)
-        print(1)
-        for key in redis_client.scan_iter():
-            if redis_client.type(key) != "hash":
-                continue
-            val = redis_client.hgetall(key)
-            if val.get("status") == "ready" and val.get("wasUsed") == "true":
-                redis_client.delete(key)
-                logging.info(f"Auto-removed used meditation: {key}")
-
-        logging.debug("Cleanup cycle complete")
-
 
 def loop_audio_stereo(samples, sample_rate, desired_duration_sec):
     total_samples_needed = int(desired_duration_sec * sample_rate)
@@ -347,18 +260,81 @@ def resample_stereo(samples_in, in_sr, out_sr):
         samples_out.append((L, R))
     return samples_out
 
+def save_wave_stereo(filename, sample_rate, samples):
+    with wave.open(filename, 'wb') as wf:
+        wf.setnchannels(1)  # моно вместо стерео для экономии
+        wf.setsampwidth(2)  # 16 бит
+        wf.setframerate(sample_rate)
+        for sample in samples:
+            left, right = sample if isinstance(sample, tuple) else (sample, sample)
+            mono_sample = (left + right) // 2
+            wf.writeframesraw(struct.pack('<h', mono_sample))
+
+
+def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
+    s3 = boto3.client(
+        's3',
+        endpoint_url="https://storage.yandexcloud.net",
+        aws_access_key_id=YANDEX_STORAGE_ACCESS_KEY,
+        aws_secret_access_key=YANDEX_STORAGE_SECRET_KEY
+    )
+    s3.upload_file(local_file_path, bucket_name, object_name)
+    return f"https://storage.yandexcloud.net/{bucket_name}/{object_name}"
+
+
+def process_all(task_id, duration_minutes, meditation_topic, melody_request):
+    try:
+        text = generate_meditation_text(duration_minutes, meditation_topic)
+        med_mp3 = text_to_speech(text, f"med_{task_id}.wav", f"med_{task_id}.mp3")
+        keywords = prompt_processing(melody_request)
+        mel_wav = generate_audio_output_stereo(keywords, duration_minutes, f"mel_{task_id}.wav")
+
+        med_audio = AudioSegment.from_mp3(med_mp3)
+        mel_audio = AudioSegment.from_wav(mel_wav)
+        combined = mel_audio.overlay(med_audio)
+        final_path = f"final_{task_id}.mp3"
+        combined.export(final_path, format="mp3", bitrate="64k")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        object_name = f"audio/meditation_{timestamp}_{task_id}.mp3"
+        url = upload_to_yandex_storage(final_path, YANDEX_CLOUD_BUCKET, object_name)
+
+        save_status(task_id, "ready", url)
+
+        # Удаление временных файлов
+        for f in [med_mp3, f"med_{task_id}.wav", mel_wav, final_path]:
+            if os.path.exists(f):
+                os.remove(f)
+
+    except Exception as e:
+        logging.error(f"Error in task {task_id}: {e}")
+        save_status(task_id, "error")
+
+
+import asyncio
+
+app = Flask(__name__)
+
+
+async def auto_cleanup():
+    while True:
+        await asyncio.sleep(60)
+        for key in list(status_store.keys()):
+            val = status_store.get(key)
+            if val and val.get("status") == "ready" and val.get("wasUsed") == "true":
+                del status_store[key]
+                logging.info(f"Auto-removed used meditation: {key}")
+
+        logging.debug("Cleanup cycle complete")
+
 
 @app.route('/generate_meditation', methods=['POST'])
 def generate():
-    print(redis_client)
-    print("co")
     validate_auth_token(request.headers.get('Authorization'))
     data = request.get_json()
     task_id = uuid.uuid4().hex
     save_status(task_id, "processing")
-    print("co")
     Thread(target=process_all, args=(task_id, data['duration'], data['topic'], data['melody'])).start()
-    print("co")
     return jsonify({"id": task_id, "status_url": f"/status/{task_id}"})
 
 
@@ -368,11 +344,8 @@ def status(task_id):
 
 
 def validate_auth_token(token):
-    print("v")
     if not token or not token.startswith("Bearer ") or token.split("Bearer ")[-1] != AUTH_JWT_SECRET:
-        print("co")
         raise RuntimeError("invalid token")
-    print("v")
 
 
 if __name__ == '__main__':
