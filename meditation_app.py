@@ -53,12 +53,13 @@ def save_status(id_, status, url=None):
     }
 
     if redis_client.exists(id_) and redis_client.type(id_) != "hash":
+        print("r")
         redis_client.delete(id_)
 
     try:
         redis_client.hset(id_, mapping=data)
     except Exception as e:
-        logging.error(f"[Redis Save Error] id={id_} data={data} error={e}")
+        print(f"[Redis Save Error] id={id_} data={data} error={e}")
         raise
     print("r")
     path = os.path.join(STATUS_DIR, f"{id_}.json")
