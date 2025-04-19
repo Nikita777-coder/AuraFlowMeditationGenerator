@@ -345,6 +345,7 @@ def status(task_id):
 
 
 def validate_auth_token(token):
+    print("co")
     if not token or not token.startswith("Bearer ") or token.split("Bearer ")[-1] != AUTH_JWT_SECRET:
         print("co")
         raise RuntimeError("invalid token")
