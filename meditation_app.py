@@ -254,6 +254,7 @@ app = Flask(__name__)
 async def auto_cleanup():
     while True:
         await asyncio.sleep(60)
+        print(1)
         for key in redis_client.scan_iter():
             if redis_client.type(key) != "hash":
                 continue
