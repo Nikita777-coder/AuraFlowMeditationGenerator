@@ -1,9 +1,9 @@
 import os
 import wave
 import struct
-import math
 import uuid
 import json
+import math
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -14,8 +14,12 @@ import boto3
 import re
 from threading import Thread
 import logging
+from redis import StrictRedis
 
-load_dotenv(dotenv_path="../keys.env")
+load_dotenv()
+
+REDIS_URL = os.getenv("REDIS_URL")
+redis_client = StrictRedis(REDIS_URL, decode_responses=True)
 
 logging.basicConfig(filename="app.log", level=logging.ERROR)
 
@@ -40,15 +44,20 @@ os.makedirs(STATUS_DIR, exist_ok=True)
 
 
 def save_status(id_, status, url=None):
+    data = {"status": status, "url": url or "", "wasUsed": "false"}
+    redis_client.hset(id_, mapping=data)
     path = os.path.join(STATUS_DIR, f"{id_}.json")
-    data = {"status": status}
-    if url:
-        data["url"] = url
     with open(path, "w") as f:
         json.dump(data, f)
 
 
 def get_status(id_):
+    redis_data = redis_client.hgetall(id_)
+    if redis_data:
+        if redis_data.get("status") == "ready":
+            redis_client.hset(id_, "wasUsed", "true")
+        return redis_data
+
     path = os.path.join(STATUS_DIR, f"{id_}.json")
     if not os.path.exists(path):
         return {"status": "not_found"}
@@ -168,6 +177,7 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
     save_wave_stereo(output_file, sample_rate, final_track)
     return output_file
 
+
 def mix_stereo_audios(*tracks):
     if not tracks:
         return []
@@ -185,71 +195,16 @@ def mix_stereo_audios(*tracks):
     return mixed
 
 
-
 def save_wave_stereo(filename, sample_rate, samples):
     with wave.open(filename, 'wb') as wf:
         wf.setnchannels(1)  # моно вместо стерео для экономии
         wf.setsampwidth(2)  # 16 бит
         wf.setframerate(sample_rate)
-        for (left, right) in samples:
+        for sample in samples:
+            left, right = sample if isinstance(sample, tuple) else (sample, sample)
             mono_sample = (left + right) // 2
             wf.writeframesraw(struct.pack('<h', mono_sample))
 
-def load_wave_stereo(filename):
-    if not os.path.isfile(filename):
-        raise FileNotFoundError(f"Файл '{filename}' не найден.")
-    with wave.open(filename, 'rb') as wf:
-        num_channels = wf.getnchannels()
-        sample_width = wf.getsampwidth()
-        sample_rate = wf.getframerate()
-        num_frames = wf.getnframes()
-        if num_channels != 2 or sample_width != 2:
-            raise ValueError("Ожидается стерео 16-бит WAV (2 канала, 16 бит).")
-        raw_data = wf.readframes(num_frames)
-    samples = []
-    for i in range(0, len(raw_data), 4):
-        frame = raw_data[i:i + 4]
-        left, right = struct.unpack('<hh', frame)
-        samples.append((left, right))
-    return sample_rate, samples
-
-def resample_stereo(samples_in, in_sr, out_sr):
-    if in_sr == out_sr:
-        return samples_in
-    n_in = len(samples_in)
-    duration_sec = n_in / in_sr
-    n_out = int(round(duration_sec * out_sr))
-    if n_out < 1:
-        return []
-    samples_out = []
-    ratio = (n_in - 1) / float(n_out - 1) if n_out > 1 else 1.0
-    for i in range(n_out):
-        pos = i * ratio
-        pos_floor = int(math.floor(pos))
-        pos_ceil = min(pos_floor + 1, n_in - 1)
-        alpha = pos - pos_floor
-        left_floor, right_floor = samples_in[pos_floor]
-        left_ceil, right_ceil = samples_in[pos_ceil]
-        left_out = left_floor + alpha * (left_ceil - left_floor)
-        right_out = right_floor + alpha * (right_ceil - right_floor)
-        L = int(round(left_out))
-        R = int(round(right_out))
-        L = max(min(L, 32767), -32768)
-        R = max(min(R, 32767), -32768)
-        samples_out.append((L, R))
-    return samples_out
-
-def loop_audio_stereo(samples, sample_rate, desired_duration_sec):
-    total_samples_needed = int(desired_duration_sec * sample_rate)
-    output = []
-    idx = 0
-    n = len(samples)
-    while len(output) < total_samples_needed:
-        output.append(samples[idx])
-        idx += 1
-        if idx >= n:
-            idx = 0
-    return output[:total_samples_needed]
 
 def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
     s3 = boto3.client(
@@ -291,7 +246,82 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
         save_status(task_id, "error")
 
 
+import asyncio
+
 app = Flask(__name__)
+
+
+async def auto_cleanup():
+    while True:
+        await asyncio.sleep(60)
+        for key in redis_client.scan_iter():
+            if redis_client.type(key) != "hash":
+                continue
+            val = redis_client.hgetall(key)
+            if val.get("status") == "ready" and val.get("wasUsed") == "true":
+                redis_client.delete(key)
+                logging.info(f"Auto-removed used meditation: {key}")
+
+        logging.debug("Cleanup cycle complete")
+
+
+def loop_audio_stereo(samples, sample_rate, desired_duration_sec):
+    total_samples_needed = int(desired_duration_sec * sample_rate)
+    output = []
+    idx = 0
+    n = len(samples)
+    while len(output) < total_samples_needed:
+        output.append(samples[idx])
+        idx += 1
+        if idx >= n:
+            idx = 0
+    return output[:total_samples_needed]
+
+
+def load_wave_stereo(filename):
+    if not os.path.isfile(filename):
+        raise FileNotFoundError(f"Файл '{filename}' не найден.")
+    with wave.open(filename, 'rb') as wf:
+        num_channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        sample_rate = wf.getframerate()
+        num_frames = wf.getnframes()
+        if num_channels != 2 or sample_width != 2:
+            raise ValueError("Ожидается стерео 16-бит WAV (2 канала, 16 бит).")
+        raw_data = wf.readframes(num_frames)
+    samples = []
+    for i in range(0, len(raw_data), 4):
+        frame = raw_data[i:i + 4]
+        left, right = struct.unpack('<hh', frame)
+        samples.append((left, right))
+    return sample_rate, samples
+
+
+def resample_stereo(samples_in, in_sr, out_sr):
+    if in_sr == out_sr:
+        return samples_in
+    n_in = len(samples_in)
+    duration_sec = n_in / in_sr
+    n_out = int(round(duration_sec * out_sr))
+    if n_out < 1:
+        return []
+    samples_out = []
+    ratio = (n_in - 1) / float(n_out - 1) if n_out > 1 else 1.0
+    for i in range(n_out):
+        pos = i * ratio
+        pos_floor = int(math.floor(pos))
+        pos_ceil = min(pos_floor + 1, n_in - 1)
+        alpha = pos - pos_floor
+        left_floor, right_floor = samples_in[pos_floor]
+        left_ceil, right_ceil = samples_in[pos_ceil]
+        left_out = left_floor + alpha * (left_ceil - left_floor)
+        right_out = right_floor + alpha * (right_ceil - right_floor)
+        L = int(round(left_out))
+        R = int(round(right_out))
+        L = max(min(L, 32767), -32768)
+        R = max(min(R, 32767), -32768)
+        samples_out.append((L, R))
+    return samples_out
 
 
 @app.route('/generate_meditation', methods=['POST'])
@@ -301,7 +331,7 @@ def generate():
     task_id = uuid.uuid4().hex
     save_status(task_id, "processing")
     Thread(target=process_all, args=(task_id, data['duration'], data['topic'], data['melody'])).start()
-    return jsonify({"meditation_processing_id": task_id})
+    return jsonify({"id": task_id, "status_url": f"/status/{task_id}"})
 
 
 @app.route('/status/<task_id>', methods=['GET'])
