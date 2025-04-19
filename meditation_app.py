@@ -15,7 +15,9 @@ import re
 from threading import Thread
 import logging
 
-load_dotenv()
+load_dotenv(dotenv_path="../keys.env")
+
+logging.basicConfig(filename="app.log", level=logging.ERROR)
 
 YANDEX_STORAGE_ACCESS_KEY = os.getenv("YANDEX_STORAGE_ACCESS_KEY")
 YANDEX_STORAGE_SECRET_KEY = os.getenv("YANDEX_STORAGE_SECRET_KEY")
@@ -96,61 +98,6 @@ def prompt_processing(user_request):
     result = sdk.models.completions("yandexgpt").configure(temperature=0.5).run(messages)
     return result.alternatives[0].text.strip() if result and result.alternatives else "Не удалось обработать запрос"
 
-def load_wave_stereo(filename):
-    if not os.path.isfile(filename):
-        raise FileNotFoundError(f"Файл '{filename}' не найден.")
-    with wave.open(filename, 'rb') as wf:
-        num_channels = wf.getnchannels()
-        sample_width = wf.getsampwidth()
-        sample_rate = wf.getframerate()
-        num_frames = wf.getnframes()
-        if num_channels != 2 or sample_width != 2:
-            raise ValueError("Ожидается стерео 16-бит WAV (2 канала, 16 бит).")
-        raw_data = wf.readframes(num_frames)
-    samples = []
-    for i in range(0, len(raw_data), 4):
-        frame = raw_data[i:i + 4]
-        left, right = struct.unpack('<hh', frame)
-        samples.append((left, right))
-    return sample_rate, samples
-
-def resample_stereo(samples_in, in_sr, out_sr):
-    if in_sr == out_sr:
-        return samples_in
-    n_in = len(samples_in)
-    duration_sec = n_in / in_sr
-    n_out = int(round(duration_sec * out_sr))
-    if n_out < 1:
-        return []
-    samples_out = []
-    ratio = (n_in - 1) / float(n_out - 1) if n_out > 1 else 1.0
-    for i in range(n_out):
-        pos = i * ratio
-        pos_floor = int(math.floor(pos))
-        pos_ceil = min(pos_floor + 1, n_in - 1)
-        alpha = pos - pos_floor
-        left_floor, right_floor = samples_in[pos_floor]
-        left_ceil, right_ceil = samples_in[pos_ceil]
-        left_out = left_floor + alpha * (left_ceil - left_floor)
-        right_out = right_floor + alpha * (right_ceil - right_floor)
-        L = int(round(left_out))
-        R = int(round(right_out))
-        L = max(min(L, 32767), -32768)
-        R = max(min(R, 32767), -32768)
-        samples_out.append((L, R))
-    return samples_out
-
-def loop_audio_stereo(samples, sample_rate, desired_duration_sec):
-    total_samples_needed = int(desired_duration_sec * sample_rate)
-    output = []
-    idx = 0
-    n = len(samples)
-    while len(output) < total_samples_needed:
-        output.append(samples[idx])
-        idx += 1
-        if idx >= n:
-            idx = 0
-    return output[:total_samples_needed]
 
 def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int,
                                  output_file: str = "static/audio/result_stereo.wav"):
@@ -238,14 +185,71 @@ def mix_stereo_audios(*tracks):
     return mixed
 
 
+
 def save_wave_stereo(filename, sample_rate, samples):
     with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(2)
-        wf.setsampwidth(2)
+        wf.setnchannels(1)  # моно вместо стерео для экономии
+        wf.setsampwidth(2)  # 16 бит
         wf.setframerate(sample_rate)
         for (left, right) in samples:
-            wf.writeframesraw(struct.pack('<hh', left, right))
+            mono_sample = (left + right) // 2
+            wf.writeframesraw(struct.pack('<h', mono_sample))
 
+def load_wave_stereo(filename):
+    if not os.path.isfile(filename):
+        raise FileNotFoundError(f"Файл '{filename}' не найден.")
+    with wave.open(filename, 'rb') as wf:
+        num_channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        sample_rate = wf.getframerate()
+        num_frames = wf.getnframes()
+        if num_channels != 2 or sample_width != 2:
+            raise ValueError("Ожидается стерео 16-бит WAV (2 канала, 16 бит).")
+        raw_data = wf.readframes(num_frames)
+    samples = []
+    for i in range(0, len(raw_data), 4):
+        frame = raw_data[i:i + 4]
+        left, right = struct.unpack('<hh', frame)
+        samples.append((left, right))
+    return sample_rate, samples
+
+def resample_stereo(samples_in, in_sr, out_sr):
+    if in_sr == out_sr:
+        return samples_in
+    n_in = len(samples_in)
+    duration_sec = n_in / in_sr
+    n_out = int(round(duration_sec * out_sr))
+    if n_out < 1:
+        return []
+    samples_out = []
+    ratio = (n_in - 1) / float(n_out - 1) if n_out > 1 else 1.0
+    for i in range(n_out):
+        pos = i * ratio
+        pos_floor = int(math.floor(pos))
+        pos_ceil = min(pos_floor + 1, n_in - 1)
+        alpha = pos - pos_floor
+        left_floor, right_floor = samples_in[pos_floor]
+        left_ceil, right_ceil = samples_in[pos_ceil]
+        left_out = left_floor + alpha * (left_ceil - left_floor)
+        right_out = right_floor + alpha * (right_ceil - right_floor)
+        L = int(round(left_out))
+        R = int(round(right_out))
+        L = max(min(L, 32767), -32768)
+        R = max(min(R, 32767), -32768)
+        samples_out.append((L, R))
+    return samples_out
+
+def loop_audio_stereo(samples, sample_rate, desired_duration_sec):
+    total_samples_needed = int(desired_duration_sec * sample_rate)
+    output = []
+    idx = 0
+    n = len(samples)
+    while len(output) < total_samples_needed:
+        output.append(samples[idx])
+        idx += 1
+        if idx >= n:
+            idx = 0
+    return output[:total_samples_needed]
 
 def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
     s3 = boto3.client(
@@ -269,7 +273,7 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
         mel_audio = AudioSegment.from_wav(mel_wav)
         combined = mel_audio.overlay(med_audio)
         final_path = f"final_{task_id}.mp3"
-        combined.export(final_path, format="mp3")
+        combined.export(final_path, format="mp3", bitrate="64k")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         object_name = f"audio/meditation_{timestamp}_{task_id}.mp3"
