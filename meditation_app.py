@@ -5,6 +5,8 @@ import uuid
 import json
 import math
 from datetime import datetime
+
+import redis
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from pydub import AudioSegment
@@ -14,12 +16,11 @@ import boto3
 import re
 from threading import Thread
 import logging
-from redis import StrictRedis
 
 load_dotenv()
 
 REDIS_URL = os.getenv("REDIS_URL")
-redis_client = StrictRedis(REDIS_URL, decode_responses=True)
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 logging.basicConfig(filename="app.log", level=logging.ERROR)
 
