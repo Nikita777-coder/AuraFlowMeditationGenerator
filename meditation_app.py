@@ -21,7 +21,6 @@ load_dotenv()
 
 REDIS_URL = os.getenv("REDIS_URL")
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-print(redis_client)
 
 logging.basicConfig(filename="app.log", level=logging.ERROR)
 
@@ -349,6 +348,7 @@ def resample_stereo(samples_in, in_sr, out_sr):
 
 @app.route('/generate_meditation', methods=['POST'])
 def generate():
+    print(redis_client)
     print("co")
     validate_auth_token(request.headers.get('Authorization'))
     data = request.get_json()
