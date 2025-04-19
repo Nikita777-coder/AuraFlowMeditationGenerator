@@ -62,15 +62,6 @@ def get_status(id_):
         os.remove(path)
     return data
 
-    path = os.path.join(STATUS_DIR, f"{id_}.json")
-    if not os.path.exists(path):
-        return {"status": "not_found"}
-    with open(path) as f:
-        data = json.load(f)
-    if data.get("status") == "ready":
-        os.remove(path)
-    return data
-
 
 def generate_meditation_text(duration_minutes, meditation_topic):
     prompt = GENERATE_MEDITATION_TEXT_PROMPT % (duration_minutes, meditation_topic)
