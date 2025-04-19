@@ -335,7 +335,7 @@ def generate():
     task_id = uuid.uuid4().hex
     save_status(task_id, "processing")
     Thread(target=process_all, args=(task_id, data['duration'], data['topic'], data['melody'])).start()
-    return jsonify({"id": task_id, "status_url": f"/status/{task_id}"})
+    return jsonify({"id": task_id})
 
 
 @app.route('/status/<task_id>', methods=['GET'])
