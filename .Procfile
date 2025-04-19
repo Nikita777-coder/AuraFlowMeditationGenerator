@@ -1,0 +1,1 @@
+web: gunicorn meditation_app:meditation_app
