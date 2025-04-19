@@ -45,8 +45,21 @@ os.makedirs(STATUS_DIR, exist_ok=True)
 
 def save_status(id_, status, url=None):
     print("r")
-    data = {"status": status, "url": url or "", "wasUsed": "false"}
-    redis_client.hset(id_, mapping=data)
+
+    data = {
+        "status": str(status),
+        "url": str(url or ""),
+        "wasUsed": "false"
+    }
+
+    if redis_client.exists(id_) and redis_client.type(id_) != "hash":
+        redis_client.delete(id_)
+
+    try:
+        redis_client.hset(id_, mapping=data)
+    except Exception as e:
+        logging.error(f"[Redis Save Error] id={id_} data={data} error={e}")
+        raise
     print("r")
     path = os.path.join(STATUS_DIR, f"{id_}.json")
     with open(path, "w") as f:
