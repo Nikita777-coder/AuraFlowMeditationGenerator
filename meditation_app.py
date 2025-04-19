@@ -219,6 +219,7 @@ def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
 
 def process_all(task_id, duration_minutes, meditation_topic, melody_request):
     try:
+        print("co")
         text = generate_meditation_text(duration_minutes, meditation_topic)
         med_mp3 = text_to_speech(text, f"med_{task_id}.wav", f"med_{task_id}.mp3")
         keywords = prompt_processing(melody_request)
@@ -327,11 +328,14 @@ def resample_stereo(samples_in, in_sr, out_sr):
 
 @app.route('/generate_meditation', methods=['POST'])
 def generate():
+    print("co")
     validate_auth_token(request.headers.get('Authorization'))
     data = request.get_json()
     task_id = uuid.uuid4().hex
     save_status(task_id, "processing")
+    print("co")
     Thread(target=process_all, args=(task_id, data['duration'], data['topic'], data['melody'])).start()
+    print("co")
     return jsonify({"id": task_id, "status_url": f"/status/{task_id}"})
 
 
