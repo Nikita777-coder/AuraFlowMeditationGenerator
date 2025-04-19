@@ -31,7 +31,6 @@ numpy==2.0.2
 packaging==24.2
 protobuf==5.29.4
 pycparser==2.22
-pydub==0.25.1
 PyJWT==2.10.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.0
