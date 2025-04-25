@@ -354,7 +354,6 @@ app = Flask(__name__)
 async def auto_cleanup():
     while True:
         await asyncio.sleep(60)
-        print(status_store)
         for key in list(status_store.keys()):
             val = status_store.get(key)
             if val and val.get("status") == "ready" and val.get("wasUsed") == "true":
