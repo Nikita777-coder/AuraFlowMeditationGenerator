@@ -1,4 +1,3 @@
-import psutil
 import os
 import wave
 import uuid
@@ -38,23 +37,17 @@ configure_credentials(
 STATUS_DIR = "status"
 os.makedirs(STATUS_DIR, exist_ok=True)
 
-def print_memory_usage(note=""):
-    process = psutil.Process(os.getpid())
-    mem = process.memory_info().rss / 1024 / 1024  # в МБ
-    print(f"[RAM] {note} Использование памяти: {mem:.2f} MB")
-
 def save_status(id_, status, url=None):
     data = {
         "status": str(status),
         "url": str(url or ""),
         "wasUsed": "false"
     }
-    print(status_store)
+
     status_store[id_] = data
 
 
 def get_status(id_):
-    print(status_store)
     data = status_store.get(id_)
     if data:
         if data.get("status") == "ready":
@@ -87,10 +80,8 @@ def generate_meditation_text(duration_minutes, meditation_topic):
         {"role": "user", "text": prompt},
     ]
 
-    print_memory_usage("До генерации текста")
     sdk = YCloudML(folder_id=YANDEX_STORAGE_FOLDER_ID, auth=YANDEX_CLOUD_ML_AUTH)
     result = sdk.models.completions("yandexgpt").configure(temperature=0.5).run(messages)
-    print_memory_usage("После генерации текста")
 
     return result.alternatives[0].text if result and result.alternatives else "Не удалось получить результат"
 
@@ -107,11 +98,9 @@ def text_to_speech(text, wav_path='output.wav', mp3_path='output.mp3'):
     model.voice = 'dasha'
     model.role = 'friendly'
 
-    print_memory_usage("До генерации звука")
     result = model.synthesize(add_tts_markup(text), raw_format=False)
     result.export(wav_path, 'wav')
     os.system(f"ffmpeg -y -i {wav_path} -b:a 64k {mp3_path}")
-    print_memory_usage("После генерации звука")
 
     return mp3_path
 
@@ -123,10 +112,8 @@ def prompt_processing(user_request):
         {"role": "user", "text": prompt},
     ]
 
-    print_memory_usage("До генерации текста")
     sdk = YCloudML(folder_id=YANDEX_STORAGE_FOLDER_ID, auth=YANDEX_CLOUD_ML_AUTH)
     result = sdk.models.completions("yandexgpt").configure(temperature=0.5).run(messages)
-    print_memory_usage("После генерации текста")
 
     return result.alternatives[0].text.strip() if result and result.alternatives else "Не удалось обработать запрос"
 
@@ -169,48 +156,32 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
 
     def load_and_resample(filepath):
         nonlocal sample_rate
-        print_memory_usage("До загрузки waw файла")
         sr, data = load_wave_stereo(filepath)
-        print_memory_usage("После загрузки waw файла")
         if sample_rate is None:
             sample_rate = sr
         else:
             if sr != sample_rate:
-                print_memory_usage("До resample_stereo waw файла")
                 data = resample_stereo(data, sr, sample_rate)
-                print_memory_usage("После resample_stereo waw файла")
         return data
 
     if mood == "calm":
-        print_memory_usage("До calm load_and_resample процесса")
         data = load_and_resample(calm_melody_file)
-        print_memory_usage("После calm load_and_resample процесса")
 
-        print_memory_usage("До calm loop_audio_stereo процесса")
         track = loop_audio_stereo(data, sample_rate, desired_duration_sec)
-        print_memory_usage("После calm loop_audio_stereo процесса")
 
         tracks_to_mix.append(track)
     elif mood == "energetic":
-        print_memory_usage("До energetic load_and_resample процесса")
         data = load_and_resample(energetic_melody_file)
-        print_memory_usage("После energetic load_and_resample процесса")
 
-        print_memory_usage("До energetic loop_audio_stereo процесса")
         track = loop_audio_stereo(data, sample_rate, desired_duration_sec)
-        print_memory_usage("После energetic loop_audio_stereo процесса")
 
         tracks_to_mix.append(track)
     for ns in nature_sounds:
         filepath = nature_files[ns]
 
-        print_memory_usage("До filepath load_and_resample процесса")
         data = load_and_resample(filepath)
-        print_memory_usage("После filepath load_and_resample процесса")
 
-        print_memory_usage("До filepath loop_audio_stereo процесса")
         track = loop_audio_stereo(data, sample_rate, desired_duration_sec)
-        print_memory_usage("После filepath loop_audio_stereo процесса")
 
         tracks_to_mix.append(track)
     if not tracks_to_mix:
@@ -219,13 +190,9 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
     if len(tracks_to_mix) == 1:
         final_track = tracks_to_mix[0]
     else:
-        print_memory_usage("До mix_stereo_audios")
         final_track = mix_stereo_audios(*tracks_to_mix)
-        print_memory_usage("После mix_stereo_audios")
 
-    print_memory_usage("До save_wave_stereo output_file")
     save_wave_stereo(output_file, sample_rate, final_track)
-    print_memory_usage("После save_wave_stereo output_file")
 
     return output_file
 
@@ -350,9 +317,7 @@ def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
         aws_secret_access_key=YANDEX_STORAGE_SECRET_KEY
     )
 
-    print_memory_usage("Использовано RAM YandexStorage до генерации")
     s3.upload_file(local_file_path, bucket_name, object_name)
-    print_memory_usage("Использовано RAM YandexStorage после генерации")
 
     return f"https://storage.yandexcloud.net/{bucket_name}/{object_name}"
 
@@ -363,13 +328,11 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
         med_mp3 = text_to_speech(text, f"med_{task_id}.wav", f"med_{task_id}.mp3")
         keywords = prompt_processing(melody_request)
         mel_wav = generate_audio_output_stereo(keywords, duration_minutes, f"mel_{task_id}.wav")
-        print_memory_usage("Использовано RAM после генерации мелодии")
 
         combined_path = f"final_{task_id}.mp3"
         os.system(
             f"ffmpeg -y -i {mel_wav} -i {med_mp3} -filter_complex amix=inputs=2:duration=first:dropout_transition=3 -b:a 64k {combined_path}")
         final_path = combined_path
-        print_memory_usage("Использовано RAM после сохранения файла")
         # экспорт уже выполнен через ffmpeg
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -410,7 +373,6 @@ def generate():
 
 @app.route('/status/<task_id>', methods=['GET'])
 def status(task_id):
-    print_memory_usage("Использовано RAM")
     return jsonify(get_status(task_id))
 
 
