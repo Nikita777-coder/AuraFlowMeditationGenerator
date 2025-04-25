@@ -231,38 +231,51 @@ def mix_stereo_audios(*tracks: np.ndarray) -> np.ndarray:
     if not tracks:
         return np.zeros((0, 2), dtype=np.int16)
 
-    # Убедиться, что все одинаковой длины
+    # Проверка на одинаковую длину и формат
     length = tracks[0].shape[0]
-    for t in tracks:
+    for i, t in enumerate(tracks):
         if t.shape != (length, 2):
-            raise ValueError("Все треки должны иметь одинаковую форму (N, 2)")
+            raise ValueError(f"Трек {i} имеет форму {t.shape}, ожидается ({length}, 2)")
 
-    stacked = np.stack(tracks, axis=0).astype(np.int32)  # (n_tracks, n_samples, 2)
-    mixed = stacked.sum(axis=0)  # (n_samples, 2)
+    # Начинаем с первого трека
+    mixed = tracks[0].astype(np.int32)
 
-    # Ограничиваем значения в допустимом диапазоне 16-бит
+    # Поэтапно прибавляем остальные
+    for t in tracks[1:]:
+        mixed += t.astype(np.int32)
+
+    # Обрезаем значения в диапазоне int16
     mixed = np.clip(mixed, -32768, 32767)
+
     return mixed.astype(np.int16)
 
 
 def loop_audio_stereo(samples: np.ndarray, sample_rate: int, desired_duration_sec: int) -> np.ndarray:
-    total_samples_needed = int(desired_duration_sec * sample_rate)
-    n = len(samples)
+    if samples.ndim != 2 or samples.shape[1] != 2:
+        raise ValueError("Ожидается массив формата (N, 2) для стерео сэмплов.")
 
-    # Сколько раз нужно полностью повторить samples
+    total_samples_needed = int(sample_rate * desired_duration_sec)
+    n = samples.shape[0]
+
+    if n == 0 or total_samples_needed == 0:
+        return np.zeros((0, 2), dtype=np.int16)
+
+    # Сколько полных повторов и сколько дополнительных сэмплов
     full_repeats = total_samples_needed // n
     remainder = total_samples_needed % n
 
-    # Используем np.tile для повторения и np.concatenate для добавки остатков
+    parts = []
+
     if full_repeats > 0:
-        repeated = np.tile(samples, (full_repeats, 1))
-    else:
-        repeated = np.empty((0, 2), dtype=samples.dtype)
+        # Повторяем сэмплы без лишнего копирования
+        parts.append(np.tile(samples, (full_repeats, 1)))
 
     if remainder > 0:
-        repeated = np.concatenate((repeated, samples[:remainder]), axis=0)
+        parts.append(samples[:remainder])
 
-    return repeated
+    # Объединяем части
+    looped = np.vstack(parts) if parts else np.zeros((0, 2), dtype=np.int16)
+    return looped
 
 
 def load_wave_stereo(filename):
