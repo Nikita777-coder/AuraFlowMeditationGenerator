@@ -1,8 +1,9 @@
+import psutil
 import os
 import wave
-import struct
 import uuid
 import json
+import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -12,6 +13,7 @@ import boto3
 import re
 from threading import Thread
 import math
+import asyncio
 
 status_store = {}
 
@@ -36,6 +38,10 @@ configure_credentials(
 STATUS_DIR = "status"
 os.makedirs(STATUS_DIR, exist_ok=True)
 
+def print_memory_usage(note=""):
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info().rss / 1024 / 1024  # в МБ
+    print(f"[RAM] {note} Использование памяти: {mem:.2f} MB")
 
 def save_status(id_, status, url=None):
     data = {
@@ -62,6 +68,15 @@ def get_status(id_):
         os.remove(path)
     return data
 
+    path = os.path.join(STATUS_DIR, f"{id_}.json")
+    if not os.path.exists(path):
+        return {"status": "not_found"}
+    with open(path) as f:
+        data = json.load(f)
+    if data.get("status") == "ready":
+        os.remove(path)
+    return data
+
 
 def generate_meditation_text(duration_minutes, meditation_topic):
     prompt = GENERATE_MEDITATION_TEXT_PROMPT % (duration_minutes, meditation_topic)
@@ -69,8 +84,12 @@ def generate_meditation_text(duration_minutes, meditation_topic):
         {"role": "system", "text": GENERATE_MEDITATION_TEXT_SYSTEM_ROLE_TEXT},
         {"role": "user", "text": prompt},
     ]
+
+    print_memory_usage("До генерации текста")
     sdk = YCloudML(folder_id=YANDEX_STORAGE_FOLDER_ID, auth=YANDEX_CLOUD_ML_AUTH)
     result = sdk.models.completions("yandexgpt").configure(temperature=0.5).run(messages)
+    print_memory_usage("После генерации текста")
+
     return result.alternatives[0].text if result and result.alternatives else "Не удалось получить результат"
 
 
@@ -85,9 +104,13 @@ def text_to_speech(text, wav_path='output.wav', mp3_path='output.mp3'):
     model = model_repository.synthesis_model()
     model.voice = 'dasha'
     model.role = 'friendly'
+
+    print_memory_usage("До генерации звука")
     result = model.synthesize(add_tts_markup(text), raw_format=False)
     result.export(wav_path, 'wav')
     os.system(f"ffmpeg -y -i {wav_path} -b:a 64k {mp3_path}")
+    print_memory_usage("После генерации звука")
+
     return mp3_path
 
 
@@ -97,8 +120,12 @@ def prompt_processing(user_request):
         {"role": "system", "text": PROMPT_PROCESSING_SYSTEM_ROLE_TEXT},
         {"role": "user", "text": prompt},
     ]
+
+    print_memory_usage("До генерации текста")
     sdk = YCloudML(folder_id=YANDEX_STORAGE_FOLDER_ID, auth=YANDEX_CLOUD_ML_AUTH)
     result = sdk.models.completions("yandexgpt").configure(temperature=0.5).run(messages)
+    print_memory_usage("После генерации текста")
+
     return result.alternatives[0].text.strip() if result and result.alternatives else "Не удалось обработать запрос"
 
 
@@ -140,26 +167,49 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
 
     def load_and_resample(filepath):
         nonlocal sample_rate
+        print_memory_usage("До загрузки waw файла")
         sr, data = load_wave_stereo(filepath)
+        print_memory_usage("После загрузки waw файла")
         if sample_rate is None:
             sample_rate = sr
         else:
             if sr != sample_rate:
+                print_memory_usage("До resample_stereo waw файла")
                 data = resample_stereo(data, sr, sample_rate)
+                print_memory_usage("После resample_stereo waw файла")
         return data
 
     if mood == "calm":
+        print_memory_usage("До calm load_and_resample процесса")
         data = load_and_resample(calm_melody_file)
+        print_memory_usage("После calm load_and_resample процесса")
+
+        print_memory_usage("До calm loop_audio_stereo процесса")
         track = loop_audio_stereo(data, sample_rate, desired_duration_sec)
+        print_memory_usage("После calm loop_audio_stereo процесса")
+
         tracks_to_mix.append(track)
     elif mood == "energetic":
+        print_memory_usage("До energetic load_and_resample процесса")
         data = load_and_resample(energetic_melody_file)
+        print_memory_usage("После energetic load_and_resample процесса")
+
+        print_memory_usage("До energetic loop_audio_stereo процесса")
         track = loop_audio_stereo(data, sample_rate, desired_duration_sec)
+        print_memory_usage("После energetic loop_audio_stereo процесса")
+
         tracks_to_mix.append(track)
     for ns in nature_sounds:
         filepath = nature_files[ns]
+
+        print_memory_usage("До filepath load_and_resample процесса")
         data = load_and_resample(filepath)
+        print_memory_usage("После filepath load_and_resample процесса")
+
+        print_memory_usage("До filepath loop_audio_stereo процесса")
         track = loop_audio_stereo(data, sample_rate, desired_duration_sec)
+        print_memory_usage("После filepath loop_audio_stereo процесса")
+
         tracks_to_mix.append(track)
     if not tracks_to_mix:
         print("Не распознано ни мелодии, ни звуков природы: генерация фонового звука пропущена.")
@@ -167,8 +217,14 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
     if len(tracks_to_mix) == 1:
         final_track = tracks_to_mix[0]
     else:
+        print_memory_usage("До mix_stereo_audios")
         final_track = mix_stereo_audios(*tracks_to_mix)
+        print_memory_usage("После mix_stereo_audios")
+
+    print_memory_usage("До save_wave_stereo output_file")
     save_wave_stereo(output_file, sample_rate, final_track)
+    print_memory_usage("После save_wave_stereo output_file")
+
     return output_file
 
 def mix_stereo_audios(*tracks):
@@ -187,35 +243,45 @@ def mix_stereo_audios(*tracks):
         mixed.append((sum_left, sum_right))
     return mixed
 
-def loop_audio_stereo(samples, sample_rate, desired_duration_sec):
+
+def loop_audio_stereo(samples: np.ndarray, sample_rate: int, desired_duration_sec: int) -> np.ndarray:
     total_samples_needed = int(desired_duration_sec * sample_rate)
-    output = []
-    idx = 0
     n = len(samples)
-    while len(output) < total_samples_needed:
-        output.append(samples[idx])
-        idx += 1
-        if idx >= n:
-            idx = 0
-    return output[:total_samples_needed]
+
+    # Сколько раз нужно полностью повторить samples
+    full_repeats = total_samples_needed // n
+    remainder = total_samples_needed % n
+
+    # Используем np.tile для повторения и np.concatenate для добавки остатков
+    if full_repeats > 0:
+        repeated = np.tile(samples, (full_repeats, 1))
+    else:
+        repeated = np.empty((0, 2), dtype=samples.dtype)
+
+    if remainder > 0:
+        repeated = np.concatenate((repeated, samples[:remainder]), axis=0)
+
+    return repeated
 
 
 def load_wave_stereo(filename):
     if not os.path.isfile(filename):
         raise FileNotFoundError(f"Файл '{filename}' не найден.")
+
     with wave.open(filename, 'rb') as wf:
         num_channels = wf.getnchannels()
         sample_width = wf.getsampwidth()
         sample_rate = wf.getframerate()
         num_frames = wf.getnframes()
+
         if num_channels != 2 or sample_width != 2:
             raise ValueError("Ожидается стерео 16-бит WAV (2 канала, 16 бит).")
+
         raw_data = wf.readframes(num_frames)
-    samples = []
-    for i in range(0, len(raw_data), 4):
-        frame = raw_data[i:i + 4]
-        left, right = struct.unpack('<hh', frame)
-        samples.append((left, right))
+
+    # Преобразование в numpy массив формата int16, little-endian
+    samples = np.frombuffer(raw_data, dtype='<i2')  # < = little-endian, i2 = int16
+    samples = samples.reshape(-1, 2)  # каждая пара: (левый, правый)
     return sample_rate, samples
 
 
@@ -245,15 +311,19 @@ def resample_stereo(samples_in, in_sr, out_sr):
         samples_out.append((L, R))
     return samples_out
 
-def save_wave_stereo(filename, sample_rate, samples):
+
+def save_wave_stereo(filename, sample_rate, samples: np.ndarray):
+    if samples.ndim != 2 or samples.shape[1] != 2:
+        raise ValueError("Ожидается массив формата (N, 2) для стерео сэмплов.")
+
+    # Усредняем каналы для получения моно
+    mono = samples.mean(axis=1).astype(np.int16)
+
     with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(1)  # моно вместо стерео для экономии
+        wf.setnchannels(1)  # моно
         wf.setsampwidth(2)  # 16 бит
         wf.setframerate(sample_rate)
-        for sample in samples:
-            left, right = sample if isinstance(sample, tuple) else (sample, sample)
-            mono_sample = (left + right) // 2
-            wf.writeframesraw(struct.pack('<h', mono_sample))
+        wf.writeframes(mono.tobytes())
 
 
 def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
@@ -263,7 +333,11 @@ def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
         aws_access_key_id=YANDEX_STORAGE_ACCESS_KEY,
         aws_secret_access_key=YANDEX_STORAGE_SECRET_KEY
     )
+
+    print_memory_usage("Использовано RAM YandexStorage до генерации")
     s3.upload_file(local_file_path, bucket_name, object_name)
+    print_memory_usage("Использовано RAM YandexStorage после генерации")
+
     return f"https://storage.yandexcloud.net/{bucket_name}/{object_name}"
 
 
@@ -273,11 +347,13 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
         med_mp3 = text_to_speech(text, f"med_{task_id}.wav", f"med_{task_id}.mp3")
         keywords = prompt_processing(melody_request)
         mel_wav = generate_audio_output_stereo(keywords, duration_minutes, f"mel_{task_id}.wav")
+        print_memory_usage("Использовано RAM после генерации мелодии")
 
         combined_path = f"final_{task_id}.mp3"
         os.system(
             f"ffmpeg -y -i {mel_wav} -i {med_mp3} -filter_complex amix=inputs=2:duration=first:dropout_transition=3 -b:a 64k {combined_path}")
         final_path = combined_path
+        print_memory_usage("Использовано RAM после сохранения файла")
         # экспорт уже выполнен через ffmpeg
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -293,11 +369,7 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
     except Exception as e:
         save_status(task_id, "error")
 
-
-import asyncio
-
 app = Flask(__name__)
-
 
 
 async def auto_cleanup():
@@ -307,6 +379,7 @@ async def auto_cleanup():
             val = status_store.get(key)
             if val and val.get("status") == "ready" and val.get("wasUsed") == "true":
                 del status_store[key]
+
 
 @app.route('/generate_meditation', methods=['POST'])
 def generate():
@@ -320,6 +393,7 @@ def generate():
 
 @app.route('/status/<task_id>', methods=['GET'])
 def status(task_id):
+    print_memory_usage("Использовано RAM")
     return jsonify(get_status(task_id))
 
 
