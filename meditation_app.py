@@ -356,7 +356,7 @@ async def auto_cleanup():
         await asyncio.sleep(60)
         for key in list(status_store.keys()):
             val = status_store.get(key)
-            if val and val.get("status") == "ready" and val.get("wasUsed") == "true":
+            if val and ((val.get("status") == "ready" and val.get("wasUsed") == "true") or (val.get("status") == "error")):
                 del status_store[key]
 
 
@@ -367,7 +367,7 @@ def generate():
     task_id = uuid.uuid4().hex
     save_status(task_id, "processing")
     Thread(target=process_all, args=(task_id, data['duration'], data['topic'], data['melody'])).start()
-    return jsonify({"id": task_id})
+    return jsonify(task_id)
 
 
 @app.route('/status/<task_id>', methods=['GET'])
