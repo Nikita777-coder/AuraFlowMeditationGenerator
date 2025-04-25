@@ -227,21 +227,22 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
 
     return output_file
 
-def mix_stereo_audios(*tracks):
+def mix_stereo_audios(*tracks: np.ndarray) -> np.ndarray:
     if not tracks:
-        return []
-    length = len(tracks[0])
+        return np.zeros((0, 2), dtype=np.int16)
+
+    # Убедиться, что все одинаковой длины
+    length = tracks[0].shape[0]
     for t in tracks:
-        if len(t) != length:
-            raise ValueError("Все треки должны иметь одинаковую длину.")
-    mixed = []
-    for i in range(length):
-        sum_left = sum(track[i][0] for track in tracks)
-        sum_right = sum(track[i][1] for track in tracks)
-        sum_left = max(min(sum_left, 32767), -32768)
-        sum_right = max(min(sum_right, 32767), -32768)
-        mixed.append((sum_left, sum_right))
-    return mixed
+        if t.shape != (length, 2):
+            raise ValueError("Все треки должны иметь одинаковую форму (N, 2)")
+
+    stacked = np.stack(tracks, axis=0).astype(np.int32)  # (n_tracks, n_samples, 2)
+    mixed = stacked.sum(axis=0)  # (n_samples, 2)
+
+    # Ограничиваем значения в допустимом диапазоне 16-бит
+    mixed = np.clip(mixed, -32768, 32767)
+    return mixed.astype(np.int16)
 
 
 def loop_audio_stereo(samples: np.ndarray, sample_rate: int, desired_duration_sec: int) -> np.ndarray:
