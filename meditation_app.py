@@ -372,6 +372,7 @@ def generate():
 
 @app.route('/status/<task_id>', methods=['GET'])
 def status(task_id):
+    validate_auth_token(request.headers.get('Authorization'))
     return jsonify(get_status(task_id))
 
 
