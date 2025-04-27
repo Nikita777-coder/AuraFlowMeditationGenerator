@@ -53,7 +53,7 @@ def save_status(id_, status, url=None):
     status_store[id_] = data
     print(status_store)
 
-def get_status(id_):
+async def get_status(id_):
     print(status_store)
     data = status_store.get(id_)
     if data:
@@ -508,7 +508,7 @@ def generate():
     return jsonify(task_id)
 
 @app.route('/status/<task_id>', methods=['GET'])
-def status(task_id):
+async def status(task_id):
     print_memory_usage("Использовано RAM")
     return jsonify(get_status(task_id))
 
