@@ -53,7 +53,7 @@ def save_status(id_, status, url=None):
     status_store[id_] = data
     print(status_store)
 
-async def get_status(id_):
+def get_status(id_):
     print(status_store)
     data = status_store.get(id_)
     if data:
@@ -488,14 +488,14 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
 # =======================================================
 app = Flask(__name__)
 
-async def auto_cleanup():
-    while True:
-        await asyncio.sleep(60)
-        print(status_store)
-        for key in list(status_store.keys()):
-            val = status_store.get(key)
-            if val and ((val.get("status") == "ready" and val.get("wasUsed") == "true") or (val.get("status") == "error")):
-                del status_store[key]
+# async def auto_cleanup():
+#     while True:
+#         await asyncio.sleep(60)
+#         print(status_store)
+#         for key in list(status_store.keys()):
+#             val = status_store.get(key)
+#             if val and ((val.get("status") == "ready" and val.get("wasUsed") == "true") or (val.get("status") == "error")):
+#                 del status_store[key]
 
 @app.route('/generate_meditation', methods=['POST'])
 def generate():
@@ -508,7 +508,7 @@ def generate():
     return jsonify(task_id)
 
 @app.route('/status/<task_id>', methods=['GET'])
-async def status(task_id):
+def status(task_id):
     print_memory_usage("Использовано RAM")
     return jsonify(get_status(task_id))
 
@@ -518,5 +518,5 @@ def validate_auth_token(token):
 
 if __name__ == '__main__':
     import threading
-    threading.Thread(target=lambda: asyncio.run(auto_cleanup()), daemon=True).start()
+    # threading.Thread(target=lambda: asyncio.run(auto_cleanup()), daemon=True).start()
     app.run(host='127.0.0.1', port=8090)
