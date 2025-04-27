@@ -488,14 +488,14 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
 # =======================================================
 app = Flask(__name__)
 
-# async def auto_cleanup():
-#     while True:
-#         await asyncio.sleep(60)
-#         print(status_store)
-#         for key in list(status_store.keys()):
-#             val = status_store.get(key)
-#             if val and ((val.get("status") == "ready" and val.get("wasUsed") == "true") or (val.get("status") == "error")):
-#                 del status_store[key]
+async def auto_cleanup():
+    while True:
+        await asyncio.sleep(60)
+        print(status_store)
+        for key in list(status_store.keys()):
+            val = status_store.get(key)
+            if val and ((val.get("status") == "ready" and val.get("wasUsed") == "true") or (val.get("status") == "error")):
+                del status_store[key]
 
 @app.route('/generate_meditation', methods=['POST'])
 def generate():
