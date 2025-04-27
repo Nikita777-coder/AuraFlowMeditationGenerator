@@ -50,8 +50,8 @@ def save_status(id_, status, url=None):
         "url": str(url or ""),
         "wasUsed": "false"
     }
-    print(status_store)
     status_store[id_] = data
+    print(status_store)
 
 def get_status(id_):
     print(status_store)
