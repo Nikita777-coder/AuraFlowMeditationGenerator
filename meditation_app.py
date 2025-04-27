@@ -14,6 +14,7 @@ import boto3
 import re
 from threading import Thread
 import asyncio
+import logging
 
 load_dotenv()
 
@@ -41,7 +42,7 @@ status_store = {}
 def print_memory_usage(note=""):
     process = psutil.Process(os.getpid())
     mem = process.memory_info().rss / 1024 / 1024  # в МБ
-    print(f"[RAM] {note} Использование памяти: {mem:.2f} MB")
+    logging.info(f"[RAM] {note} Использование памяти: {mem:.2f} MB")
 
 def save_status(id_, status, url=None):
     data = {
@@ -49,11 +50,11 @@ def save_status(id_, status, url=None):
         "url": str(url or ""),
         "wasUsed": "false"
     }
-    print(status_store)
+    logging.info(status_store)
     status_store[id_] = data
 
 def get_status(id_):
-    print(status_store)
+    logging.info(status_store)
     data = status_store.get(id_)
     if data:
         if data.get("status") == "ready":
@@ -74,10 +75,10 @@ def generate_meditation_text(duration_minutes, meditation_topic):
         {"role": "system", "text": GENERATE_MEDITATION_TEXT_SYSTEM_ROLE_TEXT},
         {"role": "user", "text": prompt},
     ]
-    print_memory_usage("До генерации текста")
+    logging.info(print_memory_usage("До генерации текста"))
     sdk = YCloudML(folder_id=YANDEX_STORAGE_FOLDER_ID, auth=YANDEX_CLOUD_ML_AUTH)
     result = sdk.models.completions("yandexgpt").configure(temperature=0.5).run(messages)
-    print_memory_usage("После генерации текста")
+    logging.info(print_memory_usage("После генерации текста"))
     return result.alternatives[0].text if result and result.alternatives else "Не удалось получить результат"
 
 def add_tts_markup(text):
@@ -90,11 +91,11 @@ def text_to_speech(text, wav_path='output.wav', mp3_path='output.mp3'):
     model = model_repository.synthesis_model()
     model.voice = 'dasha'
     model.role = 'friendly'
-    print_memory_usage("До генерации звука")
+    logging.info(print_memory_usage("До генерации звука"))
     result = model.synthesize(add_tts_markup(text), raw_format=False)
     result.export(wav_path, 'wav')
     os.system(f"ffmpeg -y -i {wav_path} -b:a 64k {mp3_path}")
-    print_memory_usage("После генерации звука")
+    logging.info(print_memory_usage("После генерации звука"))
     return mp3_path
 
 def prompt_processing(user_request):
@@ -103,10 +104,10 @@ def prompt_processing(user_request):
         {"role": "system", "text": PROMPT_PROCESSING_SYSTEM_ROLE_TEXT},
         {"role": "user", "text": prompt},
     ]
-    print_memory_usage("До генерации текста")
+    logging.info(print_memory_usage("До генерации текста"))
     sdk = YCloudML(folder_id=YANDEX_STORAGE_FOLDER_ID, auth=YANDEX_CLOUD_ML_AUTH)
     result = sdk.models.completions("yandexgpt").configure(temperature=0.5).run(messages)
-    print_memory_usage("После генерации текста")
+    logging.info(print_memory_usage("После генерации текста"))
     return result.alternatives[0].text.strip() if result and result.alternatives else "Не удалось обработать запрос"
 
 # =======================================================
@@ -238,16 +239,16 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
 
     def open_and_prepare(filepath):
         nonlocal sample_rate
-        print_memory_usage(f"До открытия {filepath}")
+        logging.info(print_memory_usage(f"До открытия {filepath}"))
         wf, sr = load_wave_stereo_stream(filepath)
-        print_memory_usage(f"После открытия {filepath}")
+        logging.info(print_memory_usage(f"После открытия {filepath}"))
 
         if sample_rate is None:
             sample_rate = sr
             return wf
 
         if sr != sample_rate:
-            print(f"Пересемплирование {filepath} с {sr} на {sample_rate}")
+            logging.info(f"Пересемплирование {filepath} с {sr} на {sample_rate}")
             samples = []
             while True:
                 chunk = read_chunk(wf)
@@ -284,7 +285,7 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
             streams.append(open_and_prepare(filepath))
 
     if not streams:
-        print("Не найдено ни мелодии, ни природы. Пропуск генерации звука.")
+        logging.info("Не найдено ни мелодии, ни природы. Пропуск генерации звука.")
         return
 
     output_wav = wave.open(output_file, 'wb')
@@ -292,7 +293,7 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
     output_wav.setsampwidth(2)
     output_wav.setframerate(sample_rate)
 
-    print_memory_usage("До обработки аудио чанками")
+    logging.info(print_memory_usage("До обработки аудио чанками"))
 
     samples_written = 0
     buffer = bytearray()
@@ -313,7 +314,7 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
         streams = valid_streams
 
         if not chunks:
-            print("Все потоки закончились. Досрочное завершение генерации.")
+            logging.info("Все потоки закончились. Досрочное завершение генерации.")
             break
 
         min_len = min(len(c) for c in chunks)
@@ -335,7 +336,7 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
     if buffer:
         output_wav.writeframes(buffer)
 
-    print_memory_usage("После обработки аудио чанками")
+    logging.info(print_memory_usage("После обработки аудио чанками"))
 
     for wf in streams:
         wf.close()
@@ -346,9 +347,9 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
         if os.path.exists(temp_file):
             try:
                 os.remove(temp_file)
-                print(f"Удален временный файл: {temp_file}")
+                logging.info(f"Удален временный файл: {temp_file}")
             except Exception as e:
-                print(f"Не удалось удалить {temp_file}: {e}")
+                logging.info(f"Не удалось удалить {temp_file}: {e}")
 
     return output_file
 
@@ -449,9 +450,9 @@ def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
         aws_access_key_id=YANDEX_STORAGE_ACCESS_KEY,
         aws_secret_access_key=YANDEX_STORAGE_SECRET_KEY
     )
-    print_memory_usage("Использовано RAM YandexStorage до генерации")
+    logging.info(print_memory_usage("Использовано RAM YandexStorage до генерации"))
     s3.upload_file(local_file_path, bucket_name, object_name)
-    print_memory_usage("Использовано RAM YandexStorage после генерации")
+    logging.info(print_memory_usage("Использовано RAM YandexStorage после генерации"))
     return f"https://storage.yandexcloud.net/{bucket_name}/{object_name}"
 
 # =======================================================
@@ -478,7 +479,7 @@ def process_all(task_id, duration_minutes, meditation_topic, melody_request):
                 os.remove(f)
 
     except Exception as e:
-        print(f"Ошибка в процессе task_id={task_id}: {e}")  # 👈 печатать ошибку в консоль!
+        logging.info(f"Ошибка в процессе task_id={task_id}: {e}")  # 👈 печатать ошибку в консоль!
         save_status(task_id, "error")
 
 
@@ -490,7 +491,7 @@ app = Flask(__name__)
 async def auto_cleanup():
     while True:
         await asyncio.sleep(60)
-        print(status_store)
+        logging.info(status_store)
         for key in list(status_store.keys()):
             val = status_store.get(key)
             if val and ((val.get("status") == "ready" and val.get("wasUsed") == "true") or (val.get("status") == "error")):
@@ -501,14 +502,14 @@ def generate():
     validate_auth_token(request.headers.get('Authorization'))
     data = request.get_json()
     task_id = uuid.uuid4().hex
-    print(data)
+    logging.info(data)
     save_status(task_id, "processing")
     Thread(target=process_all, args=(task_id, data['duration'], data['topic'], data['melody'])).start()
     return jsonify(task_id)
 
 @app.route('/status/<task_id>', methods=['GET'])
 def status(task_id):
-    print_memory_usage("Использовано RAM")
+    logging.info(print_memory_usage("Использовано RAM"))
     return jsonify(get_status(task_id))
 
 def validate_auth_token(token):
