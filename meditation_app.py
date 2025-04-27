@@ -1,8 +1,9 @@
 import os
 import wave
+import struct
+import math
 import uuid
 import json
-import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -11,10 +12,7 @@ from speechkit import model_repository, configure_credentials, creds
 import boto3
 import re
 from threading import Thread
-import math
 import asyncio
-
-status_store = {}
 
 load_dotenv()
 
@@ -36,6 +34,7 @@ configure_credentials(
 
 STATUS_DIR = "status"
 os.makedirs(STATUS_DIR, exist_ok=True)
+status_store = {}
 
 def save_status(id_, status, url=None):
     data = {
@@ -43,9 +42,7 @@ def save_status(id_, status, url=None):
         "url": str(url or ""),
         "wasUsed": "false"
     }
-
     status_store[id_] = data
-
 
 def get_status(id_):
     data = status_store.get(id_)
@@ -53,7 +50,6 @@ def get_status(id_):
         if data.get("status") == "ready":
             data["wasUsed"] = "true"
         return data
-
     path = os.path.join(STATUS_DIR, f"{id_}.json")
     if not os.path.exists(path):
         return {"status": "not_found"}
@@ -62,16 +58,6 @@ def get_status(id_):
     if data.get("status") == "ready":
         os.remove(path)
     return data
-
-    path = os.path.join(STATUS_DIR, f"{id_}.json")
-    if not os.path.exists(path):
-        return {"status": "not_found"}
-    with open(path) as f:
-        data = json.load(f)
-    if data.get("status") == "ready":
-        os.remove(path)
-    return data
-
 
 def generate_meditation_text(duration_minutes, meditation_topic):
     prompt = GENERATE_MEDITATION_TEXT_PROMPT % (duration_minutes, meditation_topic)
@@ -79,12 +65,9 @@ def generate_meditation_text(duration_minutes, meditation_topic):
         {"role": "system", "text": GENERATE_MEDITATION_TEXT_SYSTEM_ROLE_TEXT},
         {"role": "user", "text": prompt},
     ]
-
     sdk = YCloudML(folder_id=YANDEX_STORAGE_FOLDER_ID, auth=YANDEX_CLOUD_ML_AUTH)
     result = sdk.models.completions("yandexgpt").configure(temperature=0.5).run(messages)
-
     return result.alternatives[0].text if result and result.alternatives else "Не удалось получить результат"
-
 
 def add_tts_markup(text):
     text = re.sub(r'\.\s+', '. sil<[300]> ', text)
@@ -92,18 +75,14 @@ def add_tts_markup(text):
     text = re.sub(r'\?\s+', '? sil<[300]> ', text)
     return text
 
-
 def text_to_speech(text, wav_path='output.wav', mp3_path='output.mp3'):
     model = model_repository.synthesis_model()
     model.voice = 'dasha'
     model.role = 'friendly'
-
     result = model.synthesize(add_tts_markup(text), raw_format=False)
     result.export(wav_path, 'wav')
     os.system(f"ffmpeg -y -i {wav_path} -b:a 64k {mp3_path}")
-
     return mp3_path
-
 
 def prompt_processing(user_request):
     prompt = PROMPT_PROCESSING_PROMPT % user_request
@@ -111,24 +90,139 @@ def prompt_processing(user_request):
         {"role": "system", "text": PROMPT_PROCESSING_SYSTEM_ROLE_TEXT},
         {"role": "user", "text": prompt},
     ]
-
     sdk = YCloudML(folder_id=YANDEX_STORAGE_FOLDER_ID, auth=YANDEX_CLOUD_ML_AUTH)
     result = sdk.models.completions("yandexgpt").configure(temperature=0.5).run(messages)
-
     return result.alternatives[0].text.strip() if result and result.alternatives else "Не удалось обработать запрос"
 
+CHUNK_SIZE_FRAMES = 44100
+
+def load_wave_stereo_stream(filename):
+    if not os.path.isfile(filename):
+        raise FileNotFoundError(f"Файл '{filename}' не найден.")
+    wf = wave.open(filename, 'rb')
+    num_channels = wf.getnchannels()
+    sample_width = wf.getsampwidth()
+    sample_rate = wf.getframerate()
+    if num_channels != 2 or sample_width != 2:
+        raise ValueError("Ожидается стерео 16-бит WAV (2 канала, 16 бит).")
+    return wf, sample_rate
+
+def read_chunk(wf, chunk_size=CHUNK_SIZE_FRAMES):
+    raw_data = wf.readframes(chunk_size)
+    samples = []
+    for i in range(0, len(raw_data), 4):
+        frame = raw_data[i:i+4]
+        if len(frame) < 4:
+            break
+        left, right = struct.unpack('<hh', frame)
+        samples.append((left, right))
+    return samples
+
+def write_chunk(wf, samples_chunk):
+    frames = b''.join(struct.pack('<hh', L, R) for (L, R) in samples_chunk)
+    wf.writeframes(frames)
+
+def resample_chunk(samples_chunk, in_sr, out_sr):
+    if in_sr == out_sr:
+        return samples_chunk
+    n_in = len(samples_chunk)
+    if n_in == 0:
+        return []
+    duration_sec = n_in / in_sr
+    n_out = int(round(duration_sec * out_sr))
+    samples_out = []
+    ratio = (n_in - 1) / float(n_out - 1) if n_out > 1 else 1.0
+    for i in range(n_out):
+        pos = i * ratio
+        pos_floor = int(math.floor(pos))
+        pos_ceil = min(pos_floor + 1, n_in - 1)
+        alpha = pos - pos_floor
+        left_floor, right_floor = samples_chunk[pos_floor]
+        left_ceil, right_ceil = samples_chunk[pos_ceil]
+        L = int(round(left_floor + alpha * (left_ceil - left_floor)))
+        R = int(round(right_floor + alpha * (right_ceil - right_floor)))
+        L = max(min(L, 32767), -32768)
+        R = max(min(R, 32767), -32768)
+        samples_out.append((L, R))
+    return samples_out
+
+def mix_chunks(*chunks):
+    if not chunks:
+        return []
+    length = min(len(c) for c in chunks)
+    mixed = []
+    for i in range(length):
+        sum_left = sum(chunk[i][0] for chunk in chunks)
+        sum_right = sum(chunk[i][1] for chunk in chunks)
+        sum_left = max(min(sum_left, 32767), -32768)
+        sum_right = max(min(sum_right, 32767), -32768)
+        mixed.append((sum_left, sum_right))
+    return mixed
+
+def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
+    s3 = boto3.client(
+        's3',
+        endpoint_url="https://storage.yandexcloud.net",
+        aws_access_key_id=YANDEX_STORAGE_ACCESS_KEY,
+        aws_secret_access_key=YANDEX_STORAGE_SECRET_KEY
+    )
+    s3.upload_file(local_file_path, bucket_name, object_name)
+    return f"https://storage.yandexcloud.net/{bucket_name}/{object_name}"
+
+app = Flask(__name__)
+
+async def auto_cleanup():
+    while True:
+        await asyncio.sleep(60)
+        for key in list(status_store.keys()):
+            val = status_store.get(key)
+            if val and ((val.get("status") == "ready" and val.get("wasUsed") == "true") or (val.get("status") == "error")):
+                del status_store[key]
+
+@app.route('/generate_meditation', methods=['POST'])
+def generate():
+    validate_auth_token(request.headers.get('Authorization'))
+    data = request.get_json()
+    task_id = uuid.uuid4().hex
+    save_status(task_id, "processing")
+    Thread(target=process_all, args=(task_id, data['duration'], data['topic'], data['melody'])).start()
+    return jsonify(task_id)
+
+@app.route('/status/<task_id>', methods=['GET'])
+def status(task_id):
+    return jsonify(get_status(task_id))
+
+def validate_auth_token(token):
+    if not token or not token.startswith("Bearer ") or token.split("Bearer ")[-1] != AUTH_JWT_SECRET:
+        raise RuntimeError("invalid token")
+
+def process_all(task_id, duration_minutes, meditation_topic, melody_request):
+    try:
+        text = generate_meditation_text(duration_minutes, meditation_topic)
+        med_mp3 = text_to_speech(text, f"med_{task_id}.wav", f"med_{task_id}.mp3")
+        keywords = prompt_processing(melody_request)
+        mel_wav = generate_audio_output_stereo(keywords, duration_minutes, f"mel_{task_id}.wav")
+        combined_path = f"final_{task_id}.mp3"
+        os.system(
+            f"ffmpeg -y -i {mel_wav} -i {med_mp3} -filter_complex amix=inputs=2:duration=first:dropout_transition=3 -b:a 64k {combined_path}")
+        object_name = f"audio/meditation_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{task_id}.mp3"
+        url = upload_to_yandex_storage(combined_path, YANDEX_CLOUD_BUCKET, object_name)
+        save_status(task_id, "ready", url)
+        for f in [med_mp3, f"med_{task_id}.wav", mel_wav, combined_path]:
+            if os.path.exists(f):
+                os.remove(f)
+    except Exception:
+        save_status(task_id, "error")
 
 def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int,
                                  output_file: str = "static/audio/result_stereo.wav"):
     req_lower = normalized_keywords.lower()
-
     mood_map = {
         "спокойн": "calm",
         "бодр": "energetic",
         "энерг": "energetic"
     }
     mood = next((mood_map[key] for key in mood_map if key in req_lower), None)
-
     nature_map = {
         "лес": "forest",
         "море": "sea",
@@ -139,7 +233,6 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
         "ноч": "night"
     }
     nature_sounds = [nature_map[key] for key in nature_map if key in req_lower]
-
     nature_files = {
         "forest": "static/audio/forest.wav",
         "sea": "static/audio/sea.wav",
@@ -149,124 +242,101 @@ def generate_audio_output_stereo(normalized_keywords: str, duration_minutes: int
     }
     calm_melody_file = "static/audio/calm.wav"
     energetic_melody_file = "static/audio/energetic.wav"
-
-    tracks_to_mix = []
+    streams = []
     sample_rate = None
     desired_duration_sec = duration_minutes * 60
+    total_samples_needed = desired_duration_sec * 44100
+    temp_files = []
 
-    def load_and_resample(filepath):
+    def open_and_prepare(filepath):
         nonlocal sample_rate
-        sr, data = load_wave_stereo(filepath)
+        wf, sr = load_wave_stereo_stream(filepath)
         if sample_rate is None:
             sample_rate = sr
+            return wf
+        if sr != sample_rate:
+            samples = []
+            while True:
+                chunk = read_chunk(wf)
+                if not chunk:
+                    break
+                samples.extend(chunk)
+            wf.close()
+            resampled = resample_stereo(samples, sr, sample_rate)
+            temp_filename = f"temp_resampled_{uuid.uuid4().hex}.wav"
+            temp_files.append(temp_filename)
+            with wave.open(temp_filename, 'wb') as temp_wav:
+                temp_wav.setnchannels(2)
+                temp_wav.setsampwidth(2)
+                temp_wav.setframerate(sample_rate)
+                for L, R in resampled:
+                    temp_wav.writeframes(struct.pack('<hh', L, R))
+            wf_new, _ = load_wave_stereo_stream(temp_filename)
+            return wf_new
         else:
-            if sr != sample_rate:
-                data = resample_stereo(data, sr, sample_rate)
-        return data
+            return wf
 
     if mood == "calm":
-        data = load_and_resample(calm_melody_file)
-
-        track = loop_audio_stereo(data, sample_rate, desired_duration_sec)
-
-        tracks_to_mix.append(track)
+        streams.append(open_and_prepare(calm_melody_file))
     elif mood == "energetic":
-        data = load_and_resample(energetic_melody_file)
+        streams.append(open_and_prepare(energetic_melody_file))
 
-        track = loop_audio_stereo(data, sample_rate, desired_duration_sec)
-
-        tracks_to_mix.append(track)
     for ns in nature_sounds:
-        filepath = nature_files[ns]
+        filepath = nature_files.get(ns)
+        if filepath:
+            streams.append(open_and_prepare(filepath))
 
-        data = load_and_resample(filepath)
-
-        track = loop_audio_stereo(data, sample_rate, desired_duration_sec)
-
-        tracks_to_mix.append(track)
-    if not tracks_to_mix:
-        print("Не распознано ни мелодии, ни звуков природы: генерация фонового звука пропущена.")
+    if not streams:
         return
-    if len(tracks_to_mix) == 1:
-        final_track = tracks_to_mix[0]
-    else:
-        final_track = mix_stereo_audios(*tracks_to_mix)
 
-    save_wave_stereo(output_file, sample_rate, final_track)
+    output_wav = wave.open(output_file, 'wb')
+    output_wav.setnchannels(2)
+    output_wav.setsampwidth(2)
+    output_wav.setframerate(sample_rate)
+
+    samples_written = 0
+    buffer = bytearray()
+
+    while samples_written < total_samples_needed:
+        chunks = []
+        valid_streams = []
+        for wf in streams:
+            chunk = read_chunk(wf)
+            if not chunk:
+                wf.rewind()
+                chunk = read_chunk(wf)
+            if chunk:
+                chunks.append(chunk)
+                valid_streams.append(wf)
+        streams = valid_streams
+        if not chunks:
+            break
+        min_len = min(len(c) for c in chunks)
+        chunks = [c[:min_len] for c in chunks]
+        mixed = mix_chunks(*chunks)
+        to_write = mixed[:min(total_samples_needed - samples_written, len(mixed))]
+        for (left, right) in to_write:
+            buffer.extend(struct.pack('<hh', left, right))
+        if len(buffer) >= CHUNK_SIZE_FRAMES * 4:
+            output_wav.writeframes(buffer)
+            buffer.clear()
+        samples_written += len(to_write)
+
+    if buffer:
+        output_wav.writeframes(buffer)
+
+    for wf in streams:
+        wf.close()
+    output_wav.close()
+
+    for temp_file in temp_files:
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
 
     return output_file
-
-def mix_stereo_audios(*tracks: np.ndarray) -> np.ndarray:
-    if not tracks:
-        return np.zeros((0, 2), dtype=np.int16)
-
-    # Проверка на одинаковую длину и формат
-    length = tracks[0].shape[0]
-    for i, t in enumerate(tracks):
-        if t.shape != (length, 2):
-            raise ValueError(f"Трек {i} имеет форму {t.shape}, ожидается ({length}, 2)")
-
-    # Начинаем с первого трека
-    mixed = tracks[0].astype(np.int32)
-
-    # Поэтапно прибавляем остальные
-    for t in tracks[1:]:
-        mixed += t.astype(np.int32)
-
-    # Обрезаем значения в диапазоне int16
-    mixed = np.clip(mixed, -32768, 32767)
-
-    return mixed.astype(np.int16)
-
-
-def loop_audio_stereo(samples: np.ndarray, sample_rate: int, desired_duration_sec: int) -> np.ndarray:
-    if samples.ndim != 2 or samples.shape[1] != 2:
-        raise ValueError("Ожидается массив формата (N, 2) для стерео сэмплов.")
-
-    total_samples_needed = int(sample_rate * desired_duration_sec)
-    n = samples.shape[0]
-
-    if n == 0 or total_samples_needed == 0:
-        return np.zeros((0, 2), dtype=np.int16)
-
-    # Сколько полных повторов и сколько дополнительных сэмплов
-    full_repeats = total_samples_needed // n
-    remainder = total_samples_needed % n
-
-    parts = []
-
-    if full_repeats > 0:
-        # Повторяем сэмплы без лишнего копирования
-        parts.append(np.tile(samples, (full_repeats, 1)))
-
-    if remainder > 0:
-        parts.append(samples[:remainder])
-
-    # Объединяем части
-    looped = np.vstack(parts) if parts else np.zeros((0, 2), dtype=np.int16)
-    return looped
-
-
-def load_wave_stereo(filename):
-    if not os.path.isfile(filename):
-        raise FileNotFoundError(f"Файл '{filename}' не найден.")
-
-    with wave.open(filename, 'rb') as wf:
-        num_channels = wf.getnchannels()
-        sample_width = wf.getsampwidth()
-        sample_rate = wf.getframerate()
-        num_frames = wf.getnframes()
-
-        if num_channels != 2 or sample_width != 2:
-            raise ValueError("Ожидается стерео 16-бит WAV (2 канала, 16 бит).")
-
-        raw_data = wf.readframes(num_frames)
-
-    # Преобразование в numpy массив формата int16, little-endian
-    samples = np.frombuffer(raw_data, dtype='<i2')  # < = little-endian, i2 = int16
-    samples = samples.reshape(-1, 2)  # каждая пара: (левый, правый)
-    return sample_rate, samples
-
 
 def resample_stereo(samples_in, in_sr, out_sr):
     if in_sr == out_sr:
@@ -293,89 +363,3 @@ def resample_stereo(samples_in, in_sr, out_sr):
         R = max(min(R, 32767), -32768)
         samples_out.append((L, R))
     return samples_out
-
-
-def save_wave_stereo(filename, sample_rate, samples: np.ndarray):
-    if samples.ndim != 2 or samples.shape[1] != 2:
-        raise ValueError("Ожидается массив формата (N, 2) для стерео сэмплов.")
-
-    # Усредняем каналы для получения моно
-    mono = samples.mean(axis=1).astype(np.int16)
-
-    with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(1)  # моно
-        wf.setsampwidth(2)  # 16 бит
-        wf.setframerate(sample_rate)
-        wf.writeframes(mono.tobytes())
-
-
-def upload_to_yandex_storage(local_file_path, bucket_name, object_name):
-    s3 = boto3.client(
-        's3',
-        endpoint_url="https://storage.yandexcloud.net",
-        aws_access_key_id=YANDEX_STORAGE_ACCESS_KEY,
-        aws_secret_access_key=YANDEX_STORAGE_SECRET_KEY
-    )
-
-    s3.upload_file(local_file_path, bucket_name, object_name)
-
-    return f"https://storage.yandexcloud.net/{bucket_name}/{object_name}"
-
-
-def process_all(task_id, duration_minutes, meditation_topic, melody_request):
-    try:
-        text = generate_meditation_text(duration_minutes, meditation_topic)
-        med_mp3 = text_to_speech(text, f"med_{task_id}.wav", f"med_{task_id}.mp3")
-        keywords = prompt_processing(melody_request)
-        mel_wav = generate_audio_output_stereo(keywords, duration_minutes, f"mel_{task_id}.wav")
-
-        combined_path = f"final_{task_id}.mp3"
-        os.system(
-            f"ffmpeg -y -i {mel_wav} -i {med_mp3} -filter_complex amix=inputs=2:duration=first:dropout_transition=3 -b:a 64k {combined_path}")
-        final_path = combined_path
-        # экспорт уже выполнен через ffmpeg
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        object_name = f"audio/meditation_{timestamp}_{task_id}.mp3"
-        url = upload_to_yandex_storage(final_path, YANDEX_CLOUD_BUCKET, object_name)
-
-        save_status(task_id, "ready", url)
-
-        for f in [med_mp3, f"med_{task_id}.wav", mel_wav, combined_path]:
-            if os.path.exists(f):
-                os.remove(f)
-
-    except Exception as e:
-        save_status(task_id, "error")
-
-app = Flask(__name__)
-
-
-async def auto_cleanup():
-    while True:
-        await asyncio.sleep(60)
-        for key in list(status_store.keys()):
-            val = status_store.get(key)
-            if val and ((val.get("status") == "ready" and val.get("wasUsed") == "true") or (val.get("status") == "error")):
-                del status_store[key]
-
-
-@app.route('/generate_meditation', methods=['POST'])
-def generate():
-    validate_auth_token(request.headers.get('Authorization'))
-    data = request.get_json()
-    task_id = uuid.uuid4().hex
-    save_status(task_id, "processing")
-    Thread(target=process_all, args=(task_id, data['duration'], data['topic'], data['melody'])).start()
-    return jsonify(task_id)
-
-
-@app.route('/status/<task_id>', methods=['GET'])
-def status(task_id):
-    validate_auth_token(request.headers.get('Authorization'))
-    return jsonify(get_status(task_id))
-
-
-def validate_auth_token(token):
-    if not token or not token.startswith("Bearer ") or token.split("Bearer ")[-1] != AUTH_JWT_SECRET:
-        raise RuntimeError("invalid token")
