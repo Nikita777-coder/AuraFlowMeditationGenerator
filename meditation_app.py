@@ -16,7 +16,7 @@ from threading import Thread
 import asyncio
 
 # Загружаем переменные окружения
-load_dotenv(dotenv_path="../keys.env")
+load_dotenv()
 
 YANDEX_STORAGE_ACCESS_KEY = os.getenv("YANDEX_STORAGE_ACCESS_KEY")
 YANDEX_STORAGE_SECRET_KEY = os.getenv("YANDEX_STORAGE_SECRET_KEY")
@@ -518,5 +518,5 @@ def validate_auth_token(token):
 
 if __name__ == '__main__':
     import threading
-    # threading.Thread(target=lambda: asyncio.run(auto_cleanup()), daemon=True).start()
+    threading.Thread(target=lambda: asyncio.run(auto_cleanup()), daemon=True).start()
     app.run(host='127.0.0.1', port=8090)
