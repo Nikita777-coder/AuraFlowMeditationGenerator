@@ -494,6 +494,7 @@ def check_access(headers):
         "email": INTEGRATION_SERVICE_OIDC_EMAIL,
         "date": date
     }
+    headers.remove("Host")
     print(INTEGRATION_SERVICE_GET_TOKEN_URI)
     print("[DEBUG] Full URL:",
           requests.Request("GET", INTEGRATION_SERVICE_GET_TOKEN_URI, headers=headers, params=params).prepare().url)
