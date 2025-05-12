@@ -495,8 +495,10 @@ def check_access(headers):
         "date": date
     }
     print(INTEGRATION_SERVICE_GET_TOKEN_URI)
+    print("[DEBUG] Full URL:",
+          requests.Request("GET", INTEGRATION_SERVICE_GET_TOKEN_URI, headers=headers, params=params).prepare().url)
+    print("[DEBUG] Headers:", headers)
     server_token = requests.get(INTEGRATION_SERVICE_GET_TOKEN_URI, headers=headers, params=params)
-    print(server_token.request)
     if (token != server_token.text):
         raise RuntimeError("access deny")
 
