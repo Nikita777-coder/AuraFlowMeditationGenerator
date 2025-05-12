@@ -497,7 +497,6 @@ def check_access(headers):
     print(INTEGRATION_SERVICE_GET_TOKEN_URI)
     server_token = requests.get(INTEGRATION_SERVICE_GET_TOKEN_URI, headers=headers, params=params)
     print(server_token.request.url)
-    server_token = requests.get(INTEGRATION_SERVICE_GET_TOKEN_URI, headers=headers, params=params)
     if (token != server_token.text):
         raise RuntimeError("access deny")
 
