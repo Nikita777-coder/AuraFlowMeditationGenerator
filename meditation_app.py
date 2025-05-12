@@ -494,12 +494,16 @@ def check_access(headers):
         "email": INTEGRATION_SERVICE_OIDC_EMAIL,
         "date": date
     }
-    headers.remove("Host")
-    print(INTEGRATION_SERVICE_GET_TOKEN_URI)
-    print("[DEBUG] Full URL:",
-          requests.Request("GET", INTEGRATION_SERVICE_GET_TOKEN_URI, headers=headers, params=params).prepare().url)
-    print("[DEBUG] Headers:", headers)
-    server_token = requests.get(INTEGRATION_SERVICE_GET_TOKEN_URI, headers=headers, params=params)
+    headers1 = {
+        "Authorization": token,
+        "X-Token-Date": date
+    }
+    # print(INTEGRATION_SERVICE_GET_TOKEN_URI)
+    # print("[DEBUG] Full URL:",
+    #       requests.Request("GET", INTEGRATION_SERVICE_GET_TOKEN_URI, headers=headers1, params=params).prepare().url)
+    # print("[DEBUG] Headers:", headers)
+    server_token = requests.get(INTEGRATION_SERVICE_GET_TOKEN_URI, headers=headers1, params=params)
+    # print(server_token.text)
     if (token != server_token.text):
         raise RuntimeError("access deny")
 
